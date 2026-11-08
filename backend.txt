@@ -1,7 +1,7 @@
 
 ================================================================================
 File: accounts\account.controller.js
-Size: 10.11 kB
+Size: 10.23 kB
 ================================================================================
 
 const express = require('express');
@@ -214,7 +214,8 @@ function createSchema (req, res, next) {
         email: Joi.string().email().required(),
         password: Joi.string().min(6).required(), 
         confirmPassword: Joi.string().valid(Joi.ref('password')).required(),
-        role: Joi.string().valid(Role. Admin, Role.User, Role.Staff).required()
+        role: Joi.string().valid(Role. Admin, Role.User, Role.Staff).required(),
+        capabilities: Joi.array().items(Joi.string()).default([])
     });
     validateRequest(req, next, schema);
 }
@@ -229,7 +230,8 @@ function updateSchema(req, res, next) { const schemaRules = {
     lastName: Joi.string().empty(''),
     email: Joi.string().email().empty(''),
     password: Joi.string().min(6).empty(''),
-    confirmPassword: Joi.string().valid(Joi.ref('password')).empty('')
+    confirmPassword: Joi.string().valid(Joi.ref('password')).empty(''),
+    capabilities: Joi.array().items(Joi.string())
 }
 
 if (req.user.role === Role. Admin) {
@@ -280,7 +282,7 @@ function setTokenCookie(res, token) {
 
 ================================================================================
 File: accounts\account.model.js
-Size: 1.45 kB
+Size: 1.53 kB
 ================================================================================
 
 const { DataTypes } = require('sequelize');
@@ -296,7 +298,8 @@ function model(sequelize) {
         firstName: { type: DataTypes.STRING, allowNull: false }, 
         lastName: { type: DataTypes.STRING, allowNull: false }, 
         acceptTerms: { type: DataTypes.BOOLEAN },
-        role: { type: DataTypes.STRING, allowNull: false }, 
+        role: { type: DataTypes.STRING, allowNull: false },
+        capabilities: {type: DataTypes.JSON,allowNull: true, defaultValue: []}, 
         verificationToken: { type: DataTypes.STRING },
         verified: {type: DataTypes.DATE },
         resetToken: {type: DataTypes.STRING },
@@ -326,7 +329,7 @@ function model(sequelize) {
 
 ================================================================================
 File: accounts\account.service.js
-Size: 16.54 kB
+Size: 16.77 kB
 ================================================================================
 
 const config = require('config.json'); 
@@ -762,8 +765,33 @@ function randomTokenString() {
     return crypto.randomBytes (40).toString('hex');
 }
 function basicDetails(account) {
-    const { AccountId, title, firstName, lastName, email, phoneNumber, role, created, updated, isVerified } = account; 
-    return { AccountId, title, firstName, lastName, email, phoneNumber, role, created, updated, isVerified };
+    const {
+        AccountId,
+        title,
+        firstName,
+        lastName,
+        email,
+        phoneNumber,
+        role,
+        capabilities,
+        created,
+        updated,
+        isVerified
+    } = account;
+
+    return {
+        AccountId,
+        title,
+        firstName,
+        lastName,
+        email,
+        phoneNumber,
+        role,
+        capabilities: capabilities || [],
+        created,
+        updated,
+        isVerified
+    };
 }
 async function sendVerificationEmail(account, origin) {
     let message;
@@ -1025,7 +1053,7 @@ function model(sequelize) {
 
 ================================================================================
 File: maintenance\maintenance.controller.js
-Size: 6.26 kB
+Size: 7.6 kB
 ================================================================================
 
 const express = require('express');
@@ -1034,6 +1062,7 @@ const db = require('_helpers/db');
 const authorize = require('_middleware/authorize');
 const upload = require('../uploads/maintenance-images/upload.middleware');
 const aiService = require('../services/ai.service');
+const { Op } = require('sequelize');
 
 module.exports = router;
 
@@ -1056,6 +1085,8 @@ router.patch('/:id/assign', authorize(), assignRequest);
 // Upload attachment for a maintenance request
 router.post('/:id/attachments', authorize(), upload.single('image'), uploadAttachment);
 router.get('/:id/attachments', authorize(), getAttachments);
+
+
 
 async function getAssigned(req, res, next) {
     try {
@@ -1149,12 +1180,65 @@ async function updateStatus(req, res, next) {
     }
 }
 
+async function autoAssignMaintenance(category) {
+    if (!category || category === 'Other') {
+        return null;
+    }
+
+    const staffAccounts = await db.Account.findAll({
+        where: {
+            role: 'Staff'
+        }
+        
+    });
+
+    const capableStaff = staffAccounts.filter(staff => {
+        const capabilities = Array.isArray(staff.capabilities)
+            ? staff.capabilities
+            : [];
+
+        return capabilities.includes(category);
+    });
+
+    if (capableStaff.length === 0) {
+        return null;
+    }
+
+    let selectedStaff = null;
+    let lowestWorkload = Infinity;
+
+    for (const staff of capableStaff) {
+
+        const activeRequests = await db.MaintenanceRequest.count({
+            where: {
+                assignedTo: staff.AccountId,
+                status: {
+                    [Op.in]: ['Pending', 'In Progress']
+                }
+            }
+        });
+
+        if (activeRequests < lowestWorkload) {
+            lowestWorkload = activeRequests;
+            selectedStaff = staff;
+        }
+    }
+
+    return selectedStaff ? selectedStaff.AccountId : null;
+}
+
 async function create(req, res, next) {
     try {
+
+    
         const aiResult = await aiService.classifyMaintenance(
             req.body.title,
             req.body.description,
             req.body.location
+        );
+
+        const assignedTo = await autoAssignMaintenance(
+            aiResult.category
         );
 
         const request = await db.MaintenanceRequest.create({
@@ -1162,10 +1246,11 @@ async function create(req, res, next) {
             title: req.body.title,
             description: req.body.description,
             location: req.body.location,
-            
+
             category: aiResult.category,
             priority: aiResult.priority,
-            aiReason: aiResult.reason
+            aiReason: aiResult.reason,
+            assignedTo: assignedTo
         });
 
         res.json({
@@ -1370,10 +1455,10 @@ Size: 1.07 kB
 
 ================================================================================
 File: README.md
-Size: 154 B
+Size: 156 B
 ================================================================================
 
-﻿# LightGuardAPI
+﻿# Maintenance API
 https://jasonwatmore.com/post/2020/09/08/nodejs-mysql-boilerplate-api-with-email-sign-up-verification-authentication-forgot-password
 
 

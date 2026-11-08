@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('_helpers/db');
 const authorize = require('_middleware/authorize');
+const Role = require('_helpers/role');
 const upload = require('../uploads/maintenance-images/upload.middleware');
 const aiService = require('../services/ai.service');
 const { Op } = require('sequelize');
@@ -11,23 +12,33 @@ module.exports = router;
 // Create maintenance request
 router.post('/', authorize(), create);
 
-// Get all maintenance requests
+// Get maintenance requests (Admin: all, others: only their own)
 router.get('/', authorize(), getAll);
 
-// Get maintenance requests assigned to the logged-in staff
-router.get('/assigned', authorize(), getAssigned);
+// Get maintenance requests assigned to the logged-in staff (Staff only)
+router.get('/assigned', authorize(Role.Staff), getAssigned);
 
 // Get maintenance request by ID
 router.get('/:id', authorize(), getById);
 
-// Update maintenance request status
-router.patch('/:id/status', authorize(), updateStatus);
-router.patch('/:id/assign', authorize(), assignRequest);
+// Update maintenance request status (Admin or Staff)
+router.patch('/:id/status', authorize([Role.Admin, Role.Staff]), updateStatus);
+
+// Assign maintenance request to a staff member (Admin only)
+router.patch('/:id/assign', authorize(Role.Admin), assignRequest);
 
 // Upload attachment for a maintenance request
 router.post('/:id/attachments', authorize(), upload.single('image'), uploadAttachment);
 router.get('/:id/attachments', authorize(), getAttachments);
 
+
+// Admin can see everything. Others only see requests they created
+// or requests that are assigned to them.
+function canView(req, request) {
+    return req.user.role === Role.Admin
+        || request.AccountId === req.user.AccountId
+        || request.assignedTo === req.user.AccountId;
+}
 
 
 async function getAssigned(req, res, next) {
@@ -99,6 +110,13 @@ async function updateStatus(req, res, next) {
             });
         }
 
+        // Staff can only update requests assigned to them
+        if (req.user.role !== Role.Admin && request.assignedTo !== req.user.AccountId) {
+            return res.status(403).json({
+                message: 'You can only update requests assigned to you.'
+            });
+        }
+
         const validStatuses = [
             'Pending',
             'In Progress',
@@ -131,7 +149,7 @@ async function autoAssignMaintenance(category) {
         where: {
             role: 'Staff'
         }
-        
+
     });
 
     const capableStaff = staffAccounts.filter(staff => {
@@ -172,7 +190,6 @@ async function autoAssignMaintenance(category) {
 async function create(req, res, next) {
     try {
 
-    
         const aiResult = await aiService.classifyMaintenance(
             req.body.title,
             req.body.description,
@@ -208,7 +225,13 @@ async function create(req, res, next) {
 
 async function getAll(req, res, next) {
     try {
+        // Admin sees everything, everyone else only sees their own requests
+        const where = req.user.role === Role.Admin
+            ? {}
+            : { AccountId: req.user.AccountId };
+
         const requests = await db.MaintenanceRequest.findAll({
+            where,
             order: [['createdAt', 'DESC']]
         });
 
@@ -229,6 +252,12 @@ async function getById(req, res, next) {
             });
         }
 
+        if (!canView(req, request)) {
+            return res.status(403).json({
+                message: 'Access denied.'
+            });
+        }
+
         res.json(request);
     } catch (error) {
         next(error);
@@ -243,6 +272,13 @@ async function uploadAttachment(req, res, next) {
         if (!request) {
             return res.status(404).json({
                 message: 'Maintenance request not found'
+            });
+        }
+
+        // Only the owner of the request (or an Admin) can attach images
+        if (req.user.role !== Role.Admin && request.AccountId !== req.user.AccountId) {
+            return res.status(403).json({
+                message: 'Access denied.'
             });
         }
 
@@ -277,6 +313,12 @@ async function getAttachments(req, res, next) {
         if (!request) {
             return res.status(404).json({
                 message: 'Maintenance request not found'
+            });
+        }
+
+        if (!canView(req, request)) {
+            return res.status(403).json({
+                message: 'Access denied.'
             });
         }
 
