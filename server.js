@@ -26,6 +26,7 @@ app.use(cors({ origin: (origin, callback) => callback(null, true), credentials: 
 app.use('/accounts', require('./accounts/account.controller'));
 app.use('/api-docs', require('./_helpers/swagger'));
 app.use('/maintenance', require('./maintenance/maintenance.controller'));
+app.use('/activity', require('./activity/activity.controller'));
 
 app.use(errorHandler);
 

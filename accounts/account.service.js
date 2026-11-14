@@ -6,6 +6,7 @@ const { Op} = require('sequelize');
 const sendEmail = require('_helpers/send-email'); 
 const db = require('_helpers/db');
 const Role = require('_helpers/role');
+const activityService = require('../activity/activity.service');
 
 module.exports = { 
     authenticate,
@@ -20,8 +21,6 @@ module.exports = {
     getById,
     create,
     logActivity,
-    getAccountActivities,
-    getAllActivityLogs,
     update,
     updatePreferences,
     getPreferences,
@@ -41,7 +40,7 @@ async function authenticate({ email, password, ipAddress, browserInfo }) {
     await refreshToken.save();
   
     try {
-      await logActivity(account.AccountId, 'login', ipAddress, browserInfo);
+      await logActivity(account.AccountId, 'login', ipAddress, browserInfo, 'Signed in');
     } catch (error) {
       console.error('Error logging activity:', error);
     }
@@ -52,144 +51,17 @@ async function authenticate({ email, password, ipAddress, browserInfo }) {
       refreshToken: refreshToken.token
     };
   }
-async function logActivity(AccountId, actionType, ipAddress, browserInfo, updateDetails = '') {
-    try {
-      // Create a new log entry in the 'activity_log' table
-      await db.ActivityLog.create({
-        AccountId,
+// Writes one activity log entry in the background (never slows or breaks the caller).
+// Logs are kept forever. Reading them is done in activity/activity.service.js
+function logActivity(AccountId, actionType, ipAddress, browserInfo, updateDetails = '') {
+    activityService.log({
+        actorId: AccountId,
         actionType,
-        actionDetails: `IP Address: ${ipAddress}, Browser Info: ${browserInfo}, Details: ${updateDetails}`,
-        timestamp: new Date()
-      });
-  
-      // Count the number of logs for the user
-      const logCount = await db.ActivityLog.count({ where: { AccountId } });
-  
-      if (logCount > 10) {
-        // Find and delete the oldest logs
-        const logsToDelete = await db.ActivityLog.findAll({
-          where: { AccountId },
-          order: [['timestamp', 'ASC']],
-          limit: logCount - 10
-        });
-  
-        if (logsToDelete.length > 0) {
-          const logIdsToDelete = logsToDelete.map(log => log.activityLogId);
-  
-          await db.ActivityLog.destroy({
-            where: {
-              activityLogId: {
-                [Op.in]: logIdsToDelete
-              }
-            }
-          });
-          console.log(`Deleted ${logIdsToDelete.length} oldest log(s) for user ${AccountId}.`);
-        }
-      }
-    } catch (error) {
-      console.error('Error logging activity:', error);
-      throw error;
-    }
-  }
-  // Add this new service function
-async function getAllActivityLogs(filters = {}) {
-  try {
-      let whereClause = {};
-      
-      // Apply filters
-      if (filters.actionType) {
-          whereClause.actionType = { [Op.like]: `%${filters.actionType}%` };
-      }
-      
-      if (filters.userId) {
-          whereClause.AccountId = filters.userId;
-      }
-      
-      if (filters.startDate || filters.endDate) {
-          const startDate = filters.startDate ? new Date(filters.startDate) : new Date(0);
-          const endDate = filters.endDate ? new Date(filters.endDate) : new Date();
-          whereClause.timestamp = { [Op.between]: [startDate, endDate] };
-      }
-
-      // Get all activity logs with user details
-      const logs = await db.ActivityLog.findAll({
-          where: whereClause,
-          include: [{
-              model: db.Account,
-              attributes: ['email', 'firstName', 'lastName', 'role'],
-              required: true
-          }],
-          order: [['timestamp', 'DESC']]
-      });
-
-      // Format the response
-      return logs.map(log => {
-          const formattedDate = new Intl.DateTimeFormat('en-US', {
-              year: 'numeric',
-              month: '2-digit',
-              day: '2-digit',
-              hour: '2-digit',
-              minute: '2-digit',
-              hour12: true
-          }).format(new Date(log.timestamp));
-
-          return {
-              activityLogId: log.activityLogId,
-              userId: log.AccountId,
-              userEmail: log.Account.email,
-              userRole: log.Account.role,
-              userName: `${log.Account.firstName} ${log.Account.lastName}`,
-              actionType: log.actionType,
-              actionDetails: log.actionDetails,
-              timestamp: formattedDate
-          };
-      });
-  } catch (error) {
-      console.error('Error retrieving all activity logs:', error);
-      throw new Error('Error retrieving activity logs');
-  }
+        details: updateDetails,
+        ipAddress,
+        browserInfo
+    });
 }
-    async function getAccountActivities(AccountId, filters = {}) {
-      const account = await getAccount(AccountId);
-      if (!account) throw new Error('User not found');
-    
-      let whereClause = { AccountId };
-    
-      // Apply optional filters such as action type and timestamp range
-      if (filters.actionType) {
-        whereClause.actionType = { [Op.like]: `%${filters.actionType}%` };
-      }
-      if (filters.startDate || filters.endDate) {
-        const startDate = filters.startDate ? new Date(filters.startDate) : new Date(0);
-        const endDate = filters.endDate ? new Date(filters.endDate) : new Date();
-        whereClause.timestamp = { [Op.between]: [startDate, endDate] };
-      }
-    
-      try {
-        const activities = await db.ActivityLog.findAll({ where: whereClause });
-        return activities.map(activity => {
-          const formattedDate = new Intl.DateTimeFormat('en-US', {
-              year: '2-digit',
-              month: '2-digit',
-              day: '2-digit',
-              hour: '2-digit',
-              minute: '2-digit',
-              hour12: true
-          }).format(new Date(activity.timestamp));
-
-          return {
-              activityLogId: activity.activityLogId,
-              AccountId: activity.AccountId,
-              actionType: activity.actionType,
-              actionDetails: activity.actionDetails,
-              timestamp: formattedDate // Replace raw timestamp with formatted date
-          };
-      });
-      } catch (error) {
-        console.error('Error retrieving activities:', error);
-        throw new Error('Error retrieving activities');
-      }
-    }
 async function refreshToken({ token, ipAddress }) { 
     const refreshToken = await getRefreshToken(token); 
     const account = await refreshToken.getAccount();
@@ -336,12 +208,15 @@ async function update(AccountId, params, ipAddress, browserInfo) {
   const updatedFields = []; // Declare updatedFields array
   const nonUserFields = ['ipAddress', 'browserInfo'];
 
-  // Check if any meaningful changes are being made
-  const hasChanges = Object.keys(params).some(key => 
-    !nonUserFields.includes(key) && 
-    params[key] !== undefined && 
-    params[key] !== oldData[key]
+  // Fields that really changed (lists such as capabilities are compared by content)
+  const changedKeys = Object.keys(params).filter(key =>
+    !nonUserFields.includes(key) &&
+    params[key] !== undefined &&
+    !sameValue(oldData[key], params[key])
   );
+
+  // Check if any meaningful changes are being made
+  const hasChanges = changedKeys.length > 0;
 
   if (!hasChanges) {
     return basicDetails(account);
@@ -355,11 +230,16 @@ async function update(AccountId, params, ipAddress, browserInfo) {
       params.passwordHash = await hash(params.password);
   }
 
-  for (const key in params) {
-    if (params.hasOwnProperty(key) && !nonUserFields.includes(key)) {
-        if (oldData[key] !== params[key]) {
-            updatedFields.push(`${key}: ${oldData[key]} -> ${params[key]}`);
-        }
+  // Never store passwords or hashes in the activity log
+  const hiddenFields = ['confirmPassword', 'passwordHash'];
+
+  for (const key of changedKeys) {
+    if (hiddenFields.includes(key)) continue;
+
+    if (key === 'password') {
+        updatedFields.push('password');
+    } else {
+        updatedFields.push(`${fieldLabel(key)}: ${readableValue(oldData[key])} -> ${readableValue(params[key])}`);
     }
   }
 
@@ -371,7 +251,7 @@ async function update(AccountId, params, ipAddress, browserInfo) {
 
       // Log activity with updated fields
       const updateDetails = updatedFields.length > 0 
-          ? `Updated fields: ${updatedFields.join(', ')}` 
+          ? `Changed ${updatedFields.join('; ')}` 
           : 'No fields changed';
 
       await logActivity(account.AccountId, 'profile update', ipAddress || 'Unknown IP', browserInfo || 'Unknown Browser', updateDetails);
@@ -384,6 +264,32 @@ async function update(AccountId, params, ipAddress, browserInfo) {
 async function _delete(AccountId) {
     const account = await getAccount(AccountId);
     await account.destroy();
+}
+// Helpers for the profile update log: compare values and write them in plain words
+function sameValue(a, b) {
+    if (Array.isArray(a) || Array.isArray(b)) {
+        const left = (Array.isArray(a) ? a : []).map(String).sort();
+        const right = (Array.isArray(b) ? b : []).map(String).sort();
+        return left.length === right.length && left.every((value, i) => value === right[i]);
+    }
+    return a === b;
+}
+function readableValue(value) {
+    if (Array.isArray(value)) return value.length ? value.join(', ') : 'none';
+    if (value === null || value === undefined || value === '') return 'empty';
+    return String(value);
+}
+function fieldLabel(key) {
+    const labels = {
+        title: 'title',
+        firstName: 'first name',
+        lastName: 'last name',
+        email: 'email',
+        phoneNumber: 'phone number',
+        role: 'role',
+        capabilities: 'capabilities'
+    };
+    return labels[key] || key;
 }
 //===================Preferences Get & Update Function===========================
 async function getPreferences(AccountId) {
@@ -512,4 +418,3 @@ async function sendPasswordResetEmail (account, origin) {
           ${message}`
     });
 }
-    

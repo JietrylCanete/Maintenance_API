@@ -19,8 +19,6 @@ router.get('/:preferenceId/preferences',authorize(), getPreferences);
 router.put('/:preferenceId/preferences',authorize(), updatePreferences);
 
 router.get('/', authorize (Role. Admin), getAll);
-router.post('/:AccountId/activity', authorize(), getActivities);
-router.get('/activity-logs', authorize(Role.Admin), getAllActivityLogs);
 router.get('/:AccountId', authorize(), getById);
 router.post('/', authorize (Role. Admin), createSchema, create);
 router.put('/:AccountId', authorize(), updateSchema, update);
@@ -49,32 +47,6 @@ function authenticate(req, res, next) {
       })
       .catch(next);
   }
-//===================Logging Function=======================================
-function getActivities(req, res, next) {
-    const filters = {
-        actionType: req.query.actionType,
-        startDate: req.query.startDate,
-        endDate: req.query.endDate
-    };
-    accountService.getAccountActivities(req.params.id, filters)
-        .then(activities => res.json(activities))
-        .catch(next);
-}
-function getAllActivityLogs(req, res, next) {
-    const filters = {
-        actionType: req.query.actionType,
-        startDate: req.query.startDate,
-        endDate: req.query.endDate,
-        userId: req.query.userId
-    };
-    
-    accountService.getAllActivityLogs(filters)
-        .then(logs => res.json({
-            success: true,
-            data: logs
-        }))
-        .catch(next);
-}
 //====================Preferences Router Function=========================
 function getPreferences(req, res, next) {
     accountService.getPreferences(req.params.id)
